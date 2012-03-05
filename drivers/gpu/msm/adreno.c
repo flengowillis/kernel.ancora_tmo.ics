@@ -984,8 +984,7 @@ uint8_t *kgsl_sharedmem_convertaddr(struct kgsl_device *device,
 		}
 
 		spin_lock(&priv->mem_lock);
-		entry = kgsl_sharedmem_find_region(priv, gpuaddr,
-						sizeof(unsigned int));
+		entry = kgsl_sharedmem_find_region(priv, gpuaddr, size);
 		if (entry) {
 			result = kgsl_gpuaddr_to_vaddr(&entry->memdesc,
 							gpuaddr, size);
