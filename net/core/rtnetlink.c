@@ -67,7 +67,7 @@ void rtnl_lock(void)
 	mutex_lock(&rtnl_mutex);	
 	while(mutex_trylock(&rtnl_mutex2)){
 		mutex_unlock(&rtnl_mutex);
-		msleep(1);		
+		//msleep(1);
 		mutex_lock(&rtnl_mutex);	
 	}
 }
