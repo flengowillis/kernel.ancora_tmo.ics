@@ -416,6 +416,11 @@ int kgsl_ringbuffer_start(struct kgsl_ringbuffer *rb, unsigned int init_ram)
 	kgsl_yamato_regwrite(device, REG_SCRATCH_UMSK,
 			     GSL_RB_MEMPTRS_SCRATCH_MASK);
 
+	/* update the eoptimestamp field with the last retired timestamp */
+	kgsl_sharedmem_writel(&device->memstore,
+			     KGSL_DEVICE_MEMSTORE_OFFSET(eoptimestamp),
+			     rb->timestamp);
+
 	/* load the CP ucode */
 
 	status = kgsl_ringbuffer_load_pm4_ucode(device);
