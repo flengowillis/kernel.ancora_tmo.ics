@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2007 Google, Inc.
- * Copyright (c) 2009-2010, Code Aurora Forum. All rights reserved.
+ * Copyright (c) 2009-2011, Code Aurora Forum. All rights reserved.
  *
  * This software is licensed under the terms of the GNU General Public
  * License version 2, as published by the Free Software Foundation, and
@@ -31,7 +31,6 @@
 #include "smd_private.h"
 #endif
 #include "timer.h"
-#include "clock-8x60.h"
 
 enum {
 	MSM_TIMER_DEBUG_SYNC = 1U << 0,
@@ -39,7 +38,8 @@ enum {
 static int msm_timer_debug_mask;
 module_param_named(debug_mask, msm_timer_debug_mask, int, S_IRUGO | S_IWUSR | S_IWGRP);
 
-#if defined(CONFIG_ARCH_MSM7X30) || defined(CONFIG_ARCH_MSM8X60)
+#if defined(CONFIG_ARCH_MSM7X30) || defined(CONFIG_ARCH_MSM8X60) || \
+    defined(CONFIG_ARCH_MSM8960)
 #define MSM_GPT_BASE (MSM_TMR_BASE + 0x4)
 #define MSM_DGT_BASE (MSM_TMR_BASE + 0x24)
 #else
@@ -55,7 +55,7 @@ module_param_named(debug_mask, msm_timer_debug_mask, int, S_IRUGO | S_IWUSR | S_
 	#define MSM_GLOBAL_TIMER MSM_CLOCK_DGT
 #endif
 
-#if defined(CONFIG_ARCH_MSM_ARM11)
+#if defined(CONFIG_ARCH_MSM_ARM11) || defined(CONFIG_ARCH_MSM_CORTEX_A5)
 #define MSM_DGT_SHIFT (5)
 #else
 #define MSM_DGT_SHIFT (0)
@@ -98,7 +98,7 @@ enum {
 #define DGT_HZ 4800000	/* Uses TCXO/4 (19.2 MHz / 4) */
 #elif defined(CONFIG_ARCH_MSM7X30)
 #define DGT_HZ 6144000	/* Uses LPXO/4 (24.576 MHz / 4) */
-#elif defined(CONFIG_ARCH_MSM8X60)
+#elif defined(CONFIG_ARCH_MSM8X60) || defined(CONFIG_ARCH_MSM8960)
 /* Uses PXO/4 (24.576 MHz / 4) on V1, (27 MHz / 4) on V2 */
 #define DGT_HZ 6750000
 #else
@@ -202,9 +202,12 @@ static struct msm_clock msm_clocks[] = {
 		.freq = GPT_HZ,
 		.index = MSM_CLOCK_GPT,
 		.flags =
+#if defined(CONFIG_ARCH_MSM_ARM11) || defined(CONFIG_ARCH_MSM_CORTEX_A5)
 			MSM_CLOCK_FLAGS_UNSTABLE_COUNT |
 			MSM_CLOCK_FLAGS_ODD_MATCH_WRITE |
-			MSM_CLOCK_FLAGS_DELAYED_WRITE_POST,
+			MSM_CLOCK_FLAGS_DELAYED_WRITE_POST |
+#endif
+			0,
 		.write_delay = 9,
 	},
 	[MSM_CLOCK_DGT] = {
@@ -236,7 +239,7 @@ static struct msm_clock msm_clocks[] = {
 		.freq = DGT_HZ >> MSM_DGT_SHIFT,
 		.index = MSM_CLOCK_DGT,
 		.shift = MSM_DGT_SHIFT,
-		.write_delay = 2,
+		.write_delay = 9,
 	}
 };
 
@@ -264,18 +267,19 @@ static uint32_t msm_read_timer_count(struct msm_clock *clock, int global)
 	int loop_count = 0;
 
 	if (global)
-		t1 = readl(clock->regbase + TIMER_COUNT_VAL + MSM_TMR_GLOBAL);
+		t1 = __raw_readl(clock->regbase + TIMER_COUNT_VAL +
+				 MSM_TMR_GLOBAL);
 	else
-		t1 = readl(clock->regbase + TIMER_COUNT_VAL);
+		t1 = __raw_readl(clock->regbase + TIMER_COUNT_VAL);
 
 	if (!(clock->flags & MSM_CLOCK_FLAGS_UNSTABLE_COUNT))
 		return t1;
 	while (1) {
 		if (global)
-			t2 = readl(clock->regbase + TIMER_COUNT_VAL +
-					MSM_TMR_GLOBAL);
+			t2 = __raw_readl(clock->regbase + TIMER_COUNT_VAL +
+					 MSM_TMR_GLOBAL);
 		else
-			t2 = readl(clock->regbase + TIMER_COUNT_VAL);
+			t2 = __raw_readl(clock->regbase + TIMER_COUNT_VAL);
 		if (t1 == t2)
 			return t1;
 		if (loop_count++ > 10) {
@@ -350,30 +354,22 @@ static int msm_timer_set_next_event(unsigned long cycles,
 			now = msm_read_timer_count(clock, LOCAL_TIMER);
 
 	clock_state->alarm = alarm;
-	writel(alarm, clock->regbase + TIMER_MATCH_VAL);
+	__raw_writel(alarm, clock->regbase + TIMER_MATCH_VAL);
 
 	if (clock->flags & MSM_CLOCK_FLAGS_DELAYED_WRITE_POST) {
 		/* read the counter four extra times to make sure write posts
 		   before reading the time */
 		for (i = 0; i < 4; i++)
-			readl(clock->regbase + TIMER_COUNT_VAL);
+			__raw_readl(clock->regbase + TIMER_COUNT_VAL);
 	}
 	now = msm_read_timer_count(clock, LOCAL_TIMER);
 	clock_state->last_set = now;
 	clock_state->alarm_vtime = alarm + clock_state->sleep_offset;
 	late = now - alarm;
-	if (late >= (int)(-clock->write_delay << clock->shift) && late < DGT_HZ*5) {
-		static int print_limit = 10;
-		if (print_limit > 0) {
-			print_limit--;
-			printk(KERN_NOTICE "msm_timer_set_next_event(%lu) "
-			       "clock %s, alarm already expired, now %x, "
-			       "alarm %x, late %d%s\n",
-			       cycles, clock->clockevent.name, now, alarm, late,
-			       print_limit ? "" : " stop printing");
-		}
+	if (late >= (int)(-clock->write_delay << clock->shift) &&
+	    late < clock->freq*5)
 		return -ETIME;
-	}
+
 	return 0;
 }
 
@@ -405,7 +401,7 @@ static void msm_timer_set_mode(enum clock_event_mode mode,
 			clock_state->stopped_tick;
 		get_cpu_var(msm_active_clock) = clock;
 		put_cpu_var(msm_active_clock);
-		writel(TIMER_ENABLE_EN, clock->regbase + TIMER_ENABLE);
+		__raw_writel(TIMER_ENABLE_EN, clock->regbase + TIMER_ENABLE);
 
 		if (get_irq_chip(clock->irq.irq) &&
 		   get_irq_chip(clock->irq.irq)->unmask) {
@@ -414,7 +410,7 @@ static void msm_timer_set_mode(enum clock_event_mode mode,
 		}
 
 		if (clock != &msm_clocks[MSM_CLOCK_GPT])
-			writel(TIMER_ENABLE_EN,
+			__raw_writel(TIMER_ENABLE_EN,
 				msm_clocks[MSM_CLOCK_GPT].regbase +
 			       TIMER_ENABLE);
 		break;
@@ -427,7 +423,7 @@ static void msm_timer_set_mode(enum clock_event_mode mode,
 		clock_state->stopped_tick =
 			msm_read_timer_count(clock, LOCAL_TIMER) +
 			clock_state->sleep_offset;
-		writel(0, clock->regbase + TIMER_MATCH_VAL);
+		__raw_writel(0, clock->regbase + TIMER_MATCH_VAL);
 
 		if (get_irq_chip(clock->irq.irq) &&
 		   get_irq_chip(clock->irq.irq)->mask) {
@@ -437,18 +433,19 @@ static void msm_timer_set_mode(enum clock_event_mode mode,
 #ifdef CONFIG_ARCH_MSM_SCORPIONMP
 		if (clock != &msm_clocks[MSM_CLOCK_DGT] || smp_processor_id())
 #endif
-			writel(0, clock->regbase + TIMER_ENABLE);
+			__raw_writel(0, clock->regbase + TIMER_ENABLE);
 		if (clock != &msm_clocks[MSM_CLOCK_GPT]) {
 			gpt_state->in_sync = 0;
-			writel(0, msm_clocks[MSM_CLOCK_GPT].regbase +
+			__raw_writel(0, msm_clocks[MSM_CLOCK_GPT].regbase +
 			       TIMER_ENABLE);
 		}
 		break;
 	}
-	dsb();
+	wmb();
 	local_irq_restore(irq_flags);
 }
 
+#ifdef CONFIG_PM
 /*
  * Retrieve the cycle count from sclk and optionally synchronize local clock
  * with the sclk value.
@@ -478,11 +475,11 @@ static uint32_t msm_timer_do_sync_to_sclk(
 	int tmp = USEC_PER_SEC/SCLK_HZ/(loop_zero_count-1);
 
 	while (loop_zero_count--) {
-		t1 = readl(MSM_RPM_MPM_BASE + MPM_SCLK_COUNT_VAL);
+		t1 = __raw_readl(MSM_RPM_MPM_BASE + MPM_SCLK_COUNT_VAL);
 		do {
 			udelay(1);
 			t2 = t1;
-			t1 = readl(MSM_RPM_MPM_BASE + MPM_SCLK_COUNT_VAL);
+			t1 = __raw_readl(MSM_RPM_MPM_BASE + MPM_SCLK_COUNT_VAL);
 		} while ((t2 != t1) && --loop_count);
 
 		if (!loop_count) {
@@ -814,16 +811,16 @@ int64_t msm_timer_enter_idle(void)
 		msm_timer_sync_to_gpt(clock, 0);
 
 	count = msm_read_timer_count(clock, LOCAL_TIMER);
+	if (clock_state->stopped++ == 0)
+		clock_state->stopped_tick = count + clock_state->sleep_offset;
 	alarm = clock_state->alarm;
 	delta = alarm - count;
 	if (delta <= -(int32_t)((clock->freq << clock->shift) >> 10)) {
 		/* timer should have triggered 1ms ago */
 		printk(KERN_ERR "msm_timer_enter_idle: timer late %d, "
-			"reprogram it (alarm:%d, count:%d, %d\n", delta, alarm, count, -(int32_t)((clock->freq << clock->shift) >> 10));
+			"reprogram it\n", delta);
 		msm_timer_reactivate_alarm(clock);
 	}
-	if (clock_state->stopped++ == 0)
-		clock_state->stopped_tick = count + clock_state->sleep_offset;
 	if (delta <= 0)
 		return 0;
 	return clocksource_cyc2ns((alarm - count) >> clock->shift,
@@ -847,31 +844,34 @@ void msm_timer_exit_idle(int low_power)
 	if (!low_power)
 		goto exit_idle_exit;
 
-	enabled = readl(gpt_clk->regbase + TIMER_ENABLE) & TIMER_ENABLE_EN;
+	enabled = __raw_readl(gpt_clk->regbase + TIMER_ENABLE) &
+			      TIMER_ENABLE_EN;
 	if (!enabled)
-		writel(TIMER_ENABLE_EN, gpt_clk->regbase + TIMER_ENABLE);
+		__raw_writel(TIMER_ENABLE_EN, gpt_clk->regbase + TIMER_ENABLE);
 
 #if defined(CONFIG_ARCH_MSM_SCORPION) || defined(CONFIG_ARCH_MSM_SCORPIONMP)
 	gpt_clk_state->in_sync = 0;
 #else
 	gpt_clk_state->in_sync = gpt_clk_state->in_sync && enabled;
 #endif
-	dsb();
+	/* Make sure timer is actually enabled before we sync it */
+	wmb();
 	msm_timer_sync_gpt_to_sclk(1);
 
 	if (clock == gpt_clk)
 		goto exit_idle_alarm;
 
-	enabled = readl(clock->regbase + TIMER_ENABLE) & TIMER_ENABLE_EN;
+	enabled = __raw_readl(clock->regbase + TIMER_ENABLE) & TIMER_ENABLE_EN;
 	if (!enabled)
-		writel(TIMER_ENABLE_EN, clock->regbase + TIMER_ENABLE);
+		__raw_writel(TIMER_ENABLE_EN, clock->regbase + TIMER_ENABLE);
 
 #if defined(CONFIG_ARCH_MSM_SCORPION) || defined(CONFIG_ARCH_MSM_SCORPIONMP)
 	clock_state->in_sync = 0;
 #else
 	clock_state->in_sync = clock_state->in_sync && enabled;
 #endif
-	dsb();
+	/* Make sure timer is actually enabled before we sync it */
+	wmb();
 	msm_timer_sync_to_gpt(clock, 1);
 
 exit_idle_alarm:
@@ -940,7 +940,7 @@ int64_t msm_timer_get_sclk_time(int64_t *period)
 
 int __init msm_timer_init_time_sync(void (*timeout)(void))
 {
-#if defined(CONFIG_MSM_N_WAY_SMSM)
+#if defined(CONFIG_MSM_N_WAY_SMSM) && !defined(CONFIG_MSM_DIRECT_SCLK_ACCESS)
 	int ret = smsm_change_intr_mask(SMSM_TIME_MASTER_DEM, 0xFFFFFFFF, 0);
 
 	if (ret) {
@@ -959,6 +959,7 @@ int __init msm_timer_init_time_sync(void (*timeout)(void))
 	return 0;
 }
 
+#endif
 
 unsigned long long sched_clock(void)
 {
@@ -1004,18 +1005,18 @@ static void __init msm_timer_init(void)
 	int i;
 	int res;
 
-#ifdef CONFIG_ARCH_MSM8X60
-	writel(DGT_CLK_CTL_DIV_4, MSM_TMR_BASE + DGT_CLK_CTL);
+#if defined(CONFIG_ARCH_MSM8X60) || defined(CONFIG_ARCH_MSM8960)
+	__raw_writel(DGT_CLK_CTL_DIV_4, MSM_TMR_BASE + DGT_CLK_CTL);
 #endif
 
 	for (i = 0; i < ARRAY_SIZE(msm_clocks); i++) {
 		struct msm_clock *clock = &msm_clocks[i];
 		struct clock_event_device *ce = &clock->clockevent;
 		struct clocksource *cs = &clock->clocksource;
-		writel(0, clock->regbase + TIMER_ENABLE);
-		writel(1, clock->regbase + TIMER_CLEAR);
-		writel(0, clock->regbase + TIMER_COUNT_VAL);
-		writel(~0, clock->regbase + TIMER_MATCH_VAL);
+		__raw_writel(0, clock->regbase + TIMER_ENABLE);
+		__raw_writel(1, clock->regbase + TIMER_CLEAR);
+		__raw_writel(0, clock->regbase + TIMER_COUNT_VAL);
+		__raw_writel(~0, clock->regbase + TIMER_MATCH_VAL);
 
 		if ((clock->freq << clock->shift) == GPT_HZ) {
 			clock->rollover_offset = 0;
@@ -1054,8 +1055,7 @@ static void __init msm_timer_init(void)
 		clockevents_register_device(ce);
 	}
 #ifdef CONFIG_ARCH_MSM_SCORPIONMP
-	writel(1, msm_clocks[MSM_CLOCK_DGT].regbase + TIMER_ENABLE);
-	dsb();
+	__raw_writel(1, msm_clocks[MSM_CLOCK_DGT].regbase + TIMER_ENABLE);
 	set_delay_fn(read_current_timer_delay_loop);
 #endif
 }
@@ -1067,15 +1067,15 @@ void local_timer_setup(struct clock_event_device *evt)
 	static bool first_boot = true;
 	struct msm_clock *clock = &msm_clocks[MSM_GLOBAL_TIMER];
 
-#ifdef CONFIG_ARCH_MSM8X60
-	writel(DGT_CLK_CTL_DIV_4, MSM_TMR_BASE + DGT_CLK_CTL);
+#if defined(CONFIG_ARCH_MSM8X60) || defined(CONFIG_ARCH_MSM8960)
+	__raw_writel(DGT_CLK_CTL_DIV_4, MSM_TMR_BASE + DGT_CLK_CTL);
 #endif
 
 	if (first_boot) {
-		writel(0, clock->regbase  + TIMER_ENABLE);
-		writel(1, clock->regbase + TIMER_CLEAR);
-		writel(0, clock->regbase + TIMER_COUNT_VAL);
-		writel(~0, clock->regbase + TIMER_MATCH_VAL);
+		__raw_writel(0, clock->regbase  + TIMER_ENABLE);
+		__raw_writel(1, clock->regbase + TIMER_CLEAR);
+		__raw_writel(0, clock->regbase + TIMER_COUNT_VAL);
+		__raw_writel(~0, clock->regbase + TIMER_MATCH_VAL);
 		__get_cpu_var(msm_clocks_percpu)[clock->index].alarm = ~0;
 		first_boot = false;
 	}
@@ -1095,7 +1095,6 @@ void local_timer_setup(struct clock_event_device *evt)
 	local_clock_event = evt;
 
 	local_irq_save(flags);
-	dsb();
 	gic_clear_spi_pending(clock->irq.irq);
 	get_irq_chip(clock->irq.irq)->unmask(clock->irq.irq);
 	local_irq_restore(flags);
